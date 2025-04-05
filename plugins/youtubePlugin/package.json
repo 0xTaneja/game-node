@@ -1,0 +1,30 @@
+{
+  "name": "@virtuals-protocol/game-youtube-plugin",
+  "version": "1.0.0",
+  "description": "Youtube Plugin for GAME framework",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "tsup": "tsup src/*.ts --dts --format cjs --out-dir dist",
+    "build": "npm run tsup"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@virtuals-protocol/game": "^0.1.7",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "googleapis": "^134.0.0",
+    "mongoose": "^8.13.2"
+  },
+  "devDependencies": {
+    "ts-node-dev": "^2.0.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2"
+  },
+  "files": [
+    "dist"
+  ]
+}

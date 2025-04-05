@@ -3,10 +3,13 @@ import TwitterPlugin, {
   GameTwitterClient,
   TwitterClient,
 } from "@virtuals-protocol/game-twitter-plugin";
-
+import dotenv from "dotenv";
+import path from "path";
+dotenv.config({path:path.join(__dirname,'../../../.env')});
 const gameTwitterClient = new GameTwitterClient({
-  accessToken: "xxxxxxxxxx",
+  accessToken: process.env.TWITTER_ACCESS_TOKEN || "",
 });
+console.log(process.env.TWITTER_ACCESS_TOKEN)
 
 const nativeTwitterClient = new TwitterClient({
   apiKey: "xxxxxxx",
@@ -26,7 +29,7 @@ const twitterPlugin = new TwitterPlugin({
 });
 
 // Create an agent with the worker
-const agent = new GameAgent("<GAME_API_KEY>", {
+const agent = new GameAgent(process.env.API_KEY||"", {
   name: "Twitter Bot",
   goal: "increase engagement and grow follower count",
   description: "A bot that can post tweets, reply to tweets, and like tweets",

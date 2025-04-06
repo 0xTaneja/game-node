@@ -1,30 +1,119 @@
 import { GameWorker,GameFunction,ExecutableGameFunctionResponse,ExecutableGameFunctionStatus } from "@virtuals-protocol/game";
 import { youtubeClient,YoutubeChannel,YoutubeVideo } from "./youtubeClient";
+import { YoutubeScheduler } from "./youtubeScheduler";
 
 import * as storage from "../db/storage";
 
 import TwitterPlugin from "../../twitterPlugin/src/twitterPlugin";
+import { TweetFormatter } from "./tweetFormatter";
 
-interface IYoutubePluginOptions{
-    id?:string;
-    name?:string;
-    description?:string;
-    youtubeClient:youtubeClient;
-    twitterPlugin?:TwitterPlugin;
+// Plugin state interface
+export interface PluginState {
+  trackedChannels: number;
+  topCreators: string[];
+  lastTrendingUpdate: string;
+  totalTweets: number;
+  isMonitoring: boolean;
 }
 
-class YoutubePlugin{
-    private id:string;
-    private name:string;
-    private description:string;
-    private youtubeClient:youtubeClient;
-    private twitterPlugin?:TwitterPlugin;
-    constructor(options:IYoutubePluginOptions){
-        this.id = options.id ||"youtube_worker";
+interface IYoutubePluginOptions {
+    id?: string;
+    name?: string;
+    description?: string;
+    youtubeClient: youtubeClient;
+    twitterPlugin?: TwitterPlugin;
+    autoStartScheduler?: boolean; // Option to auto-start scheduler
+    onStateUpdate?: (state: PluginState) => void; // Callback for state updates
+}
+
+class YoutubePlugin {
+    private id: string;
+    private name: string;
+    private description: string;
+    private youtubeClient: youtubeClient;
+    private twitterPlugin?: TwitterPlugin;
+    private scheduler: YoutubeScheduler;
+    private state: PluginState;
+    private onStateUpdate?: (state: PluginState) => void;
+    
+    constructor(options: IYoutubePluginOptions) {
+        this.id = options.id || "youtube_worker";
         this.name = options.name || "Youtube Worker";
         this.description = options.description || "A worker that tracks YouTube channels, analyzes trends, and monitors creator growth";
         this.youtubeClient = options.youtubeClient;
         this.twitterPlugin = options.twitterPlugin;
+        this.onStateUpdate = options.onStateUpdate;
+
+        // Initialize state
+        this.state = {
+          trackedChannels: 0,
+          topCreators: [],
+          lastTrendingUpdate: new Date().toISOString(),
+          totalTweets: 0,
+          isMonitoring: false
+        };
+
+        // Initialize the scheduler with Twitter plugin for posting and optional state update callback
+        this.scheduler = new YoutubeScheduler(
+            this.youtubeClient,
+            this.twitterPlugin,
+            this.onStateUpdate ? (state: Partial<PluginState>) => this.updateState(state) : undefined
+        );
+
+        // Auto-start the scheduler if specified
+        if (options.autoStartScheduler) {
+            this.startMonitoring();
+        }
+    }
+
+    // Method to update state and notify listeners
+    private updateState(newState: Partial<PluginState>): void {
+        this.state = { ...this.state, ...newState };
+        
+        // Log state changes
+        console.log("Plugin state updated:", this.state);
+        
+        // Notify callback if provided
+        if (this.onStateUpdate) {
+            this.onStateUpdate(this.state);
+        }
+    }
+
+    // Method to post a tweet using the Twitter plugin
+    public async postTweet(content: string, reason: string): Promise<boolean> {
+        if (!this.twitterPlugin) {
+            console.log("No Twitter plugin configured, skipping tweet:", content);
+            return false;
+        }
+
+        try {
+            console.log(`Sending tweet: ${content.substring(0, 50)}... (${reason})`);
+            
+            // Get the tweet function from the Twitter plugin
+            const tweetFn = (this.twitterPlugin as any).postTweetFunction;
+            if (!tweetFn || !tweetFn.executable) {
+                throw new Error("Twitter plugin does not have a valid post tweet function");
+            }
+            
+            // Execute the tweet function
+            const mockLogger = (msg: string) => console.log(`Posting tweet: ${msg}`);
+            const result = await tweetFn.executable({ 
+                tweet: content, 
+                tweet_reasoning: reason 
+            }, mockLogger);
+            
+            // Update tweet count on success
+            if (result && result.status === ExecutableGameFunctionStatus.Done) {
+                this.updateState({ totalTweets: (this.state.totalTweets || 0) + 1 });
+                return true;
+            }
+            
+            console.error("Failed to post tweet:", result?.message || "Unknown error");
+            return false;
+        } catch (error) {
+            console.error("Error posting tweet:", error);
+            return false;
+        }
     }
 
     public getWorker(data?: {
@@ -41,6 +130,8 @@ class YoutubePlugin{
             this.getTrackedChannelsFunction,
             this.getChannelMetricsFunction,
             this.getTrendingVideosFunction,
+            this.startMonitoringFunction,
+            this.stopMonitoringFunction
           ],
           getEnvironment: data?.getEnvironment || this.getMetrics.bind(this),
         });
@@ -50,10 +141,85 @@ class YoutubePlugin{
         // Get all tracked channels
         const channels = await storage.getAllTrackedChannels();
         
+        // Update state with channel count
+        this.updateState({ trackedChannels: channels.length });
+        
+        // Calculate tier distribution
+        const tier1Count = channels.filter(c => c.monitoringTier === 1).length;
+        const tier2Count = channels.filter(c => c.monitoringTier === 2).length;
+        const tier3Count = channels.filter(c => c.monitoringTier === 3).length;
+        
         return {
           trackedChannels: channels.length,
-          // Add more metrics as needed
+          tier1Channels: tier1Count,
+          tier2Channels: tier2Count,
+          tier3Channels: tier3Count
         };
+      }
+
+      // Add methods to start/stop the scheduler
+      public startMonitoring(): void {
+        this.scheduler.start();
+        this.updateState({ isMonitoring: true });
+      }
+      
+      public stopMonitoring(): void {
+        this.scheduler.stop();
+        this.updateState({ isMonitoring: false });
+      }
+
+      // Add function to let AI start monitoring
+      get startMonitoringFunction() {
+        return new GameFunction({
+          name: "start_youtube_monitoring",
+          description: "Start the background monitoring of YouTube channels",
+          args: [] as const,
+          executable: async (args, logger) => {
+            try {
+              logger("Starting YouTube monitoring system");
+              
+              this.startMonitoring();
+              
+              return new ExecutableGameFunctionResponse(
+                ExecutableGameFunctionStatus.Done,
+                "YouTube monitoring started successfully"
+              );
+            } catch (e) {
+              const errorMessage = e instanceof Error ? e.message : "Unknown error";
+              return new ExecutableGameFunctionResponse(
+                ExecutableGameFunctionStatus.Failed,
+                `Failed to start monitoring: ${errorMessage}`
+              );
+            }
+          }
+        });
+      }
+      
+      // Add function to let AI stop monitoring
+      get stopMonitoringFunction() {
+        return new GameFunction({
+          name: "stop_youtube_monitoring",
+          description: "Stop the background monitoring of YouTube channels",
+          args: [] as const,
+          executable: async (args, logger) => {
+            try {
+              logger("Stopping YouTube channel monitoring...");
+              
+              this.stopMonitoring();
+              
+              return new ExecutableGameFunctionResponse(
+                ExecutableGameFunctionStatus.Done,
+                "YouTube monitoring has been stopped"
+              );
+            } catch (e) {
+              const errorMessage = e instanceof Error ? e.message : "Unknown error";
+              return new ExecutableGameFunctionResponse(
+                ExecutableGameFunctionStatus.Failed,
+                `Failed to stop monitoring: ${errorMessage}`
+              );
+            }
+          }
+        });
       }
 
       get searchChannelsFunction() {
@@ -144,25 +310,31 @@ class YoutubePlugin{
                 );
               }
               
-              // Create metrics from channel info
-              const metrics = {
+              // Get total likes as an additional metric
+              const totalLikes = await this.youtubeClient.getTotalChannelLikes(args.channel_id);
+              
+              // Create channel in database
+              const currentMetrics = {
                 subscribers: channelInfo.statistics.subscriberCount,
                 views: channelInfo.statistics.viewCount,
-                likes: 0, // Will be updated in the background
+                likes: totalLikes,
                 lastVideoId: '',
-                lastVideoTimestamp: Date.now(),
+                lastVideoTimestamp: 0,
                 lastChecked: Date.now()
               };
               
-              // Store in database
-              await storage.createChannel(channelInfo.id, channelInfo.title, metrics);
+              await storage.createChannel(
+                args.channel_id,
+                channelInfo.title,
+                currentMetrics
+              );
               
               // Optionally post to Twitter
               if (this.twitterPlugin) {
                 await this.twitterPlugin.postTweetFunction.executable({
-                  tweet: `Started tracking YouTube channel "${channelInfo.title}"! Will monitor growth and notify about significant changes.`,
+                  tweet: TweetFormatter.formatTrackingAnnouncementTweet(channelInfo),
                   tweet_reasoning: "Announcing new channel tracking to followers"
-                }, logger);
+                }, (message: string) => console.log(message));
               }
       
               return new ExecutableGameFunctionResponse(
@@ -179,8 +351,8 @@ class YoutubePlugin{
           },
         });
       }
-
-      // Add missing function - Get all tracked channels
+      
+      // Get all tracked channels
       get getTrackedChannelsFunction() {
         return new GameFunction({
           name: "get_tracked_channels",
@@ -204,6 +376,7 @@ class YoutubePlugin{
                 name: channel.name,
                 subscribers: channel.metrics.subscribers,
                 views: channel.metrics.views,
+                monitoringTier: channel.monitoringTier,
                 lastChecked: new Date(channel.metrics.lastChecked).toISOString()
               }));
               
@@ -226,7 +399,7 @@ class YoutubePlugin{
         });
       }
       
-      // Add missing function - Get channel metrics
+      // Get channel metrics
       get getChannelMetricsFunction() {
         return new GameFunction({
           name: "get_channel_metrics",
@@ -276,6 +449,7 @@ class YoutubePlugin{
               // Format response
               const metricsReport = {
                 channelName: channelData.name,
+                monitoringTier: channelData.monitoringTier,
                 currentMetrics: {
                   subscribers: latestData.statistics.subscriberCount,
                   views: latestData.statistics.viewCount,
@@ -289,13 +463,16 @@ class YoutubePlugin{
                   viewPercentage: channelData.metrics.views > 0 ? 
                     (viewGrowth / channelData.metrics.views * 100).toFixed(2) + '%' : 'N/A'
                 },
+                lastVideo: channelData.metrics.lastVideoId ? 
+                  `https://www.youtube.com/watch?v=${channelData.metrics.lastVideoId}` : 'No video tracked yet',
                 latestVideos: latestVideos.map(video => ({
                   title: video.title,
                   published: new Date(video.publishedAt).toISOString(),
                   views: video.statistics.viewCount,
                   likes: video.statistics.likeCount
                 })),
-                lastUpdated: new Date(channelData.metrics.lastChecked).toISOString()
+                lastUpdated: new Date(channelData.metrics.lastChecked).toISOString(),
+                lastTrendingDate: channelData.lastTrendingDate.toISOString()
               };
               
               // Update channel metrics in database with latest data
@@ -329,7 +506,7 @@ class YoutubePlugin{
         });
       }
       
-      // Add missing function - Get trending videos
+      // Get trending videos
       get getTrendingVideosFunction() {
         return new GameFunction({
           name: "get_trending_videos",
@@ -380,6 +557,61 @@ class YoutubePlugin{
           }
         });
       }
+
+      // Track a youtube channel and save it to db
+      public async trackChannel(channelId: string): Promise<{success: boolean, message: string}> {
+        try {
+            // Validate the channelId
+            if(!channelId.trim()) {
+                return {success: false, message: "Channel ID cannot be empty"};
+            }
+            
+            // Check if we're already tracking this channel
+            const existingChannel = await storage.getChannel(channelId);
+            if(existingChannel) {
+                return {success: false, message: `Already tracking channel with ID ${channelId}`};
+            }
+            
+            // Get channel info from YouTube API
+            const channelInfo = await this.youtubeClient.getChannel(channelId);
+            
+            if(!channelInfo) {
+                return {success: false, message: `Could not find channel with ID ${channelId}`};
+            }
+            
+            // Get total likes as an additional metric
+            const totalLikes = await this.youtubeClient.getTotalChannelLikes(channelId);
+            
+            // Create channel in database
+            const currentMetrics = {
+                subscribers: channelInfo.statistics.subscriberCount,
+                views: channelInfo.statistics.viewCount,
+                likes: totalLikes,
+                lastVideoId: '',
+                lastVideoTimestamp: 0,
+                lastChecked: Date.now()
+            };
+            
+            await storage.createChannel(
+                channelId,
+                channelInfo.title,
+                currentMetrics
+            );
+            
+            // Optionally post to Twitter
+            if (this.twitterPlugin) {
+                await this.twitterPlugin.postTweetFunction.executable({
+                    tweet: TweetFormatter.formatTrackingAnnouncementTweet(channelInfo),
+                    tweet_reasoning: "Announcing new channel tracking to followers"
+                }, (message: string) => console.log(message));
+            }
+            
+            return {success: true, message: `Now tracking YouTube channel "${channelInfo.title}"`};
+        } catch (error: any) {
+            console.error("Error tracking channel:", error);
+            return {success: false, message: `Error tracking channel: ${error.message}`};
+        }
+    }
 }
 
 export { YoutubePlugin };

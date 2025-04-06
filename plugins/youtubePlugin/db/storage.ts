@@ -20,6 +20,7 @@ export interface IChannel extends Document {
  name:string;
  isTracking:boolean;
  lastTrendingDate:Date;
+ monitoringTier:number; // 1 = current trending, 2 = recently trending, 3 = previously trending
  metrics:ChannelMetrics;
  metricsHistory:ChannelMetrics[];   
 }
@@ -30,6 +31,7 @@ const ChannelSchema = new Schema <IChannel>({
     name : {type:String,required:true},
     isTracking:{type:Boolean,default:true},
     lastTrendingDate:{type:Date,default:Date.now},
+    monitoringTier:{type:Number,default:3}, // Default to lowest priority tier
     metrics:{
         subscribers:{type:Number,default:0},
         views:{type:Number,default:0},
@@ -57,11 +59,17 @@ let isConnected = false;
 export async function connectDB(){
     if(isConnected) return;
     const MONGODB_URI = process.env.MONGODB_URI||'mongodb://localhost:27017/youtubePlugin';
+    const MONGODB_DB_NAME = process.env.MONGODB_DB_NAME || 'youtube_monitor';
 
     try{
+      // Connect to the main URI but ensure we're using the youtube_monitor database
       await connect(MONGODB_URI);
+      
+      // Explicitly set the database to use
+      mongoose.connection.useDb(MONGODB_DB_NAME, { useCache: true });
+      
       isConnected = true;
-      console.log('MongoDB connected successfully');
+      console.log(`MongoDB connected successfully to database: ${MONGODB_DB_NAME}`);
     }
     catch(error){
      console.error('MongoDB Connection Error :',error);
@@ -69,9 +77,18 @@ export async function connectDB(){
     }
 }
 
-export async function getAllTrackedChannels():Promise<IChannel[]>{
+export async function getAllTrackedChannels(filter?: Partial<IChannel>): Promise<IChannel[]> {
     await connectDB();
-    return Channel.find({isTracking:true}).exec();
+    
+    // Start with base query for tracked channels
+    let query: any = { isTracking: true };
+    
+    // Add any additional filters
+    if (filter) {
+        query = { ...query, ...filter };
+    }
+    
+    return Channel.find(query).exec();
 }
 
 export async function getChannel(channelId:string):Promise<IChannel | null>{
@@ -113,11 +130,22 @@ export async function createChannel(channelId:string,name:string,metrics:Channel
        metrics,
        isTracking:true,
        lastTrendingDate:new Date(),
+       monitoringTier:1, // New channels from trending start at tier 1
        metricsHistory:[]
     });
 
     await newChannel.save();
     return newChannel;
+}
+
+// Add this method to update channel properties
+export async function updateChannel(channelId: string, updates: Partial<IChannel>): Promise<IChannel | null> {
+    await connectDB();
+    return Channel.findOneAndUpdate(
+        { channelId }, 
+        updates, 
+        { new: true }
+    ).exec();
 }
 
 // Check if metric change is significant

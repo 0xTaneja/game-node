@@ -72,9 +72,6 @@ const twitterClient = new GameTwitterClient({
     accessToken: process.env.TWITTER_ACCESS_TOKEN
 });
 
-// Add isDryRun property to the Twitter client
-(twitterClient as any).isDryRun = isDryRun;
-
 // Create Twitter plugin with the proper client
 const twitterPlugin = new TwitterPlugin({
     id: "twitter_worker",
@@ -83,13 +80,60 @@ const twitterPlugin = new TwitterPlugin({
     twitterClient: twitterClient
 });
 
-// Configure Twitter to actually send tweets unless TWITTER_DRY_RUN=true
+// Diagnostic function to verify the Twitter plugin configuration
+function diagnoseTwitterPlugin() {
+    console.log("---- Twitter Plugin Diagnostic ----");
+    
+    // Check if the plugin instance exists
+    if (!twitterPlugin) {
+        console.error("Twitter plugin is null or undefined!");
+        return;
+    }
+    
+    // Check if essential methods exist
+    console.log("Twitter plugin methods available:");
+    console.log("- postTweetFunction exists:", !!twitterPlugin.postTweetFunction);
+    
+    // Check if twitterClient is accessible
+    try {
+        // Use type assertion to check private property
+        const client = (twitterPlugin as any).twitterClient;
+        console.log("- twitterClient exists:", !!client);
+        console.log("- twitterClient.post exists:", !!(client && typeof client.post === 'function'));
+        
+        // Test accessing needed properties
+        if (twitterPlugin.postTweetFunction) {
+            const postFn = twitterPlugin.postTweetFunction;
+            console.log("- postTweetFunction.executable exists:", !!(postFn && typeof postFn.executable === 'function'));
+        }
+    } catch (error) {
+        console.error("Error checking Twitter plugin configuration:", error);
+    }
+    
+    console.log("----------------------------------");
+}
+
+// Run diagnostic
+diagnoseTwitterPlugin();
+
+// Configure Twitter posting mode
 if (isDryRun) {
   console.log('Twitter in DRY RUN mode - tweets will be logged but not sent');
 } else {
   console.log('Twitter in LIVE mode - tweets will be sent to Twitter API');
-  console.log(`Twitter client configured with isDryRun=${isDryRun}`);
+  console.log(`Using Twitter token: ${process.env.TWITTER_ACCESS_TOKEN?.substring(0, 10)}...`);
 }
+
+// Test Twitter client connection
+(async () => {
+  try {
+    // Try to get Twitter account info to verify connection
+    const twitterInfo = await twitterClient.me();
+    console.log(`Twitter client authenticated successfully: ${twitterInfo.data.username || 'Unknown username'}`);
+  } catch (err: any) {
+    console.warn(`Twitter authentication check: ${err.message || 'Unknown error'}`);
+  }
+})();
 
 // Create the YouTube plugin with Twitter integration
 // This passes the actual Twitter plugin for posting updates
@@ -113,27 +157,50 @@ const youtubePlugin = new YoutubePlugin({
 export { youtubePlugin };
 
 // Create the YouTube monitoring agent
-export const youtube_agent = new GameAgent(process.env.API_KEY, {
-    name: "YouTube Trend Monitor",
-    goal: "Autonomously discover, track, and analyze YouTube creators and their metrics to identify trends, measure growth patterns, and share insights through automated Twitter updates",
-    description: `This autonomous agent continuously monitors the YouTube ecosystem by:
-
-1. Discovering trending creators across multiple content categories
-2. Tracking key metrics including subscribers, views, likes, and engagement
-3. Analyzing growth patterns with adaptive thresholds based on channel size
-4. Detecting significant metric changes that indicate important trends
-5. Automatically posting updates to Twitter when notable events are detected
-6. Using multiple API keys with automatic failover when rate limits are reached
-7. Maintaining persistent state for long-term trend analysis
-
-The agent operates 24/7 to provide real-time insights into the YouTube creator landscape without manual intervention.`,
-    workers: [youtubeMonitorWorker],
-    llmModel: LLMModel.DeepSeek_R1,
-    getAgentState: getAgentState
+const agent = new GameAgent(process.env.API_KEY || "", {
+  name: "YouTube Community Engager",
+  goal: "Monitor YouTube channels, discover trending creators, and actively engage with the community on Twitter. Search for and participate in discussions about trending creators, share insights about channel growth, and interact with relevant tweets to build community engagement. When a creator trends, find and engage with tweets about them, reply to discussions, and share growth insights.",
+  description: `An autonomous agent that:
+1. Monitors YouTube channels and tracks metrics
+2. Discovers trending creators and analyzes their growth
+3. Actively searches Twitter for discussions about trending creators
+4. Engages with the community by:
+   - Replying to tweets about all monitored trending creators
+   - Liking relevant content about all monitored channels
+   - Quoting tweets to share growth insights
+   - Participating in discussions about creator success
+5. Shares detailed metrics and growth analysis
+6. Builds community engagement around trending creators`,
+  workers: [
+    youtubePlugin.getWorker({
+      functions: [
+        youtubePlugin.searchChannelsFunction,
+        youtubePlugin.trackChannelFunction,
+        youtubePlugin.getTrackedChannelsFunction,
+        youtubePlugin.getChannelMetricsFunction,
+        youtubePlugin.getTrendingVideosFunction,
+        youtubePlugin.startMonitoringFunction,
+        youtubePlugin.stopMonitoringFunction,
+        youtubePlugin.tweetFunction,
+        // Add Twitter functions for interaction
+        ...(youtubePlugin.twitterPlugin ? [
+          youtubePlugin.twitterPlugin.searchTweetsFunction,
+          youtubePlugin.twitterPlugin.replyTweetFunction,
+          youtubePlugin.twitterPlugin.likeTweetFunction,
+          youtubePlugin.twitterPlugin.quoteTweetFunction
+        ] : [])
+      ],
+      getEnvironment: async () => ({
+        ...(await youtubePlugin.getMetrics()),
+        mode: youtubePlugin.isMonitoring ? "active" : "inactive",
+        updated: new Date().toISOString()
+      })
+    })
+  ]
 });
 
 // Set up logging for the agent
-youtube_agent.setLogger((agent: GameAgent, msg: string) => {
+agent.setLogger((agent: GameAgent, msg: string) => {
     console.log(`📺 [${agent.name}]`);
     console.log(msg);
     console.log("------------------------\n");
@@ -143,16 +210,19 @@ youtube_agent.setLogger((agent: GameAgent, msg: string) => {
 (async () => {
     try {
         // Log startup information
-        console.log("-----------------------------");
-        console.log("🚀 Starting YouTube Monitor Agent");
+        console.log("\n\n");
+        console.log("===========================================================");
+        console.log("🚀🚀🚀 STARTING YOUTUBE MONITOR SYSTEM 🚀🚀🚀");
+        console.log("===========================================================");
         console.log(`Using ${youtubeApiKeys.length} YouTube API keys with automatic rate limit handling`);
         console.log(`API keys will rotate automatically when quota limits are reached`);
         console.log(`Using Twitter Access Token: ${process.env.TWITTER_ACCESS_TOKEN?.substring(0, 10)}...`);
         console.log(`Database: ${process.env.MONGODB_URI}`);
         console.log(`Twitter Posting: ${isDryRun ? 'DRY RUN (disabled)' : 'LIVE (enabled)'}`);
-        console.log("-----------------------------");
+        console.log(`Monitoring Schedule: Trending - 24 hours, Metrics - 15 minutes`);
+        console.log("===========================================================");
         
-        await youtube_agent.init();
+        await agent.init();
         console.log("YouTube monitoring agent initialized successfully");
         
         // Start monitoring automatically - this will use the actual YouTube API and Twitter
@@ -162,15 +232,64 @@ youtube_agent.setLogger((agent: GameAgent, msg: string) => {
         // Update agent state to reflect monitoring status
         updateAgentState({ isMonitoring: true });
         
-        // Run the agent in continuous mode
+        // Run the agent in continuous mode with retry logic
+        console.log("Starting agent loop with resilient error handling...");
+        let consecutiveErrors = 0;
+        
         while (true) {
-            await youtube_agent.step({
-                verbose: true,
-            });
-            // Sleep to avoid excessive API calls
-            await new Promise(resolve => setTimeout(resolve, 30000)); // 30 seconds
+            try {
+                // Execute agent step with verbose logging
+                await agent.step({
+                    verbose: true,
+                });
+                
+                // Success - reset error counter and wait normal time
+                consecutiveErrors = 0;
+                const normalDelay = 120000; // 2 minutes
+                console.log(`Agent step successful, waiting ${normalDelay/1000} seconds before next step`);
+                await new Promise(resolve => setTimeout(resolve, normalDelay));
+            } catch (stepError) {
+                // Count consecutive errors for exponential backoff
+                consecutiveErrors++;
+                
+                // Calculate backoff delay with more aggressive scaling
+                const baseDelay = 120000; // 2 minutes base delay
+                const backoffFactor = Math.min(Math.pow(3, consecutiveErrors - 1), 25); // More aggressive exponential growth (3^n)
+                const backoffDelay = Math.min(baseDelay * backoffFactor, 3600000); // max 1 hour
+                
+                console.warn(`Agent step failed (${consecutiveErrors} consecutive errors)`);
+                console.warn(`Error: ${(stepError as Error)?.message || String(stepError)}`);
+                console.warn(`Will retry after ${backoffDelay/1000} seconds (${backoffDelay/60000} minutes) backoff`);
+                
+                // If API quota errors are detected, use maximum backoff
+                const errorStr = String(stepError);
+                if (errorStr.includes('quota') || errorStr.includes('403') || errorStr.includes('429')) {
+                    console.warn("API quota exceeded - using maximum backoff time");
+                    await new Promise(resolve => setTimeout(resolve, 3600000)); // 1 hour
+                    continue;
+                }
+                
+                // If we see a 524 error specifically
+                if (errorStr.includes('524') || errorStr.includes('timeout')) {
+                    console.warn("Detected connection timeout (524) - this is likely due to Game SDK rate limiting");
+                    console.warn("YouTube monitoring will continue to operate normally despite this error");
+                }
+                
+                // Wait with exponential backoff
+                await new Promise(resolve => setTimeout(resolve, backoffDelay));
+            }
         }
     } catch (error) {
-        console.error("Error starting agent:", error);
+        console.error("Fatal error starting agent:", error);
+        
+        // Even if the agent fails completely, make sure monitoring continues
+        try {
+            if (!youtubePlugin.isMonitoring) {
+                youtubePlugin.startMonitoring();
+                console.warn("Restarted monitoring after fatal error");
+            }
+        } catch (monitorError) {
+            console.error("Failed to ensure monitoring continues:", monitorError);
+        }
     }
 })();

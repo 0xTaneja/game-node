@@ -43,6 +43,22 @@ export class TweetFormatter {
   }
 
   /**
+   * Ensure tweet doesn't exceed Twitter's character limit
+   * @param tweet Tweet text
+   * @param maxLength Maximum allowed length (default: 280)
+   * @returns Trimmed tweet that fits within limits
+   */
+  static enforceTweetLength(tweet: string, maxLength: number = 280): string {
+    if (tweet.length <= maxLength) {
+      return tweet;
+    }
+    
+    // If tweet is too long, trim it and add ellipsis
+    console.log(`Tweet too long (${tweet.length} chars), trimming to ${maxLength}`);
+    return tweet.substring(0, maxLength - 3) + '...';
+  }
+
+  /**
    * Format a new video announcement tweet
    * @param channel YouTube channel
    * @param video Latest video
@@ -53,17 +69,12 @@ export class TweetFormatter {
     const emojis = ['🎥', '📹', '🎬', '📺', '🔴'];
     const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
     
-    // Create attention-grabbing header with creator name
-    const header = `${randomEmoji} NEW VIDEO ALERT ${randomEmoji}\n`;
-    
-    // Format main content with video details
-    const content = `${channel.title} just uploaded:\n\n"${video.title}"\n\n`;
-    
-    // Add video link and call to action
-    const footer = `🔗 Watch now: https://youtu.be/${video.id}\n\n` +
-      `🔔 Like, Comment & Subscribe! #YouTube #${channel.title.replace(/\s+/g, '')} #NewContent`;
-    
-    return header + content + footer;
+    // Simple format with video details
+    const tweet = `${randomEmoji} NEW: "${video.title}" by ${channel.title}\n` +
+           `🔗 https://youtu.be/${video.id}\n` +
+           `#YouTube #NewVideo`;
+           
+    return this.enforceTweetLength(tweet);
   }
 
   /**
@@ -85,33 +96,65 @@ export class TweetFormatter {
       minute: '2-digit'
     });
     
+    // Calculate changes and percentages
+    const subChange = currentMetrics.subscribers - oldMetrics.subscribers;
+    const viewChange = currentMetrics.views - oldMetrics.views;
+    const subChangePercent = oldMetrics.subscribers > 0 ? 
+      ((subChange / oldMetrics.subscribers) * 100).toFixed(2) : '0.00';
+    const viewChangePercent = oldMetrics.views > 0 ? 
+      ((viewChange / oldMetrics.views) * 100).toFixed(2) : '0.00';
+    
+    // Format numbers with appropriate units
+    const formatSubs = this.formatNumber(currentMetrics.subscribers);
+    const formatViews = this.formatNumber(currentMetrics.views);
+    const formatSubChange = this.formatNumber(Math.abs(subChange));
+    const formatViewChange = this.formatNumber(Math.abs(viewChange));
+    
     // Create descriptive header with timestamp
-    const header = `📊 CREATOR METRICS UPDATE • ${timestamp}\n\n`;
+    const header = `📊 CHANNEL UPDATE • ${timestamp}\n`;
     
-    // Add creator name with decoration
-    const creatorLine = `✨ ${channelInfo.title} ✨\n\n`;
+    // Add channel name with link
+    const channelLine = `🎥 ${channelInfo.title}\n`;
     
-    // Format each metric with value and change percentage
-    const subscribersChange = this.formatPercentageChange(oldMetrics.subscribers, currentMetrics.subscribers);
-    const viewsChange = this.formatPercentageChange(oldMetrics.views, currentMetrics.views);
-    const likesChange = this.formatPercentageChange(oldMetrics.likes, currentMetrics.likes);
+    // Create detailed metrics section
+    const metricsSection = 
+      `👥 Subscribers: ${formatSubs} (${subChange >= 0 ? '↑' : '↓'} ${formatSubChange} | ${subChangePercent}%)\n` +
+      `👁️ Total Views: ${formatViews} (${viewChange >= 0 ? '↑' : '↓'} ${formatViewChange} | ${viewChangePercent}%)\n`;
     
-    const subscribersLine = `👥 Subscribers: ${this.formatNumber(currentMetrics.subscribers, true)} ${subscribersChange}\n`;
-    const viewsLine = `👁️ Total Views: ${this.formatNumber(currentMetrics.views, true)} ${viewsChange}\n`;
-    const likesLine = `❤️ Total Likes: ${this.formatNumber(currentMetrics.likes, true)} ${likesChange}\n\n`;
+    // Add growth context
+    const growthContext = this.getGrowthContext(subChange, viewChange);
     
-    // Add hashtags relevant to growth
-    let hashtags = '#YouTubeGrowth #CreatorAnalytics';
+    // Add relevant hashtags
+    const hashtags = '#YouTubeGrowth #CreatorAnalytics #YouTubeStats';
     
-    // Add conditional hashtags based on growth
-    if (currentMetrics.subscribers > oldMetrics.subscribers) {
-      hashtags += ' #GrowingCreator';
+    return this.enforceTweetLength(
+      header + 
+      channelLine + 
+      metricsSection + 
+      growthContext + 
+      hashtags
+    );
+  }
+
+  private static getGrowthContext(subChange: number, viewChange: number): string {
+    const subGrowthRate = subChange / 1000; // Growth per 1K subs
+    const viewGrowthRate = viewChange / 1000000; // Growth per 1M views
+    
+    let context = '';
+    
+    if (subGrowthRate > 10) {
+      context += '🚀 Rapid subscriber growth!\n';
+    } else if (subGrowthRate > 5) {
+      context += '📈 Steady subscriber growth\n';
     }
-    if (currentMetrics.views - oldMetrics.views > 10000) {
-      hashtags += ' #ViralContent';
+    
+    if (viewGrowthRate > 1) {
+      context += '🔥 High view momentum\n';
+    } else if (viewGrowthRate > 0.5) {
+      context += '📊 Consistent view growth\n';
     }
     
-    return header + creatorLine + subscribersLine + viewsLine + likesLine + hashtags;
+    return context;
   }
 
   /**
@@ -129,24 +172,19 @@ export class TweetFormatter {
     // Create attention-grabbing header with date
     const headerText = `🔥 TRENDING CREATORS • ${date} 🔥\n\n`;
     
-    // Format each creator entry with rich details
+    // Format each creator entry with minimal details to keep tweet short
     const creatorEntries = topCreators.map((creator, i) => {
       const rank = this.formatRank(i + 1);
       const subs = this.formatNumber(creator.statistics.subscriberCount);
-      const views = this.formatNumber(creator.statistics.viewCount);
-      const videos = creator.statistics.videoCount;
       
-      return `${rank} ${creator.title}\n` +
-             `   👥 ${subs} subscribers\n` +
-             `   👁️ ${views} views\n` +
-             `   🎬 ${videos} videos\n` +
-             `   🔗 youtube.com/channel/${creator.id}`;
+      // Simplified format with just name and subscribers
+      return `${rank} ${creator.title} (${subs} subs)`;
     });
     
     // Add engaging footer with call to action
-    const footerText = `\n\n📈 Follow these creators for amazing content! 🚀\n#YouTube #TrendingCreators #ContentCreation`;
+    const footerText = `\n\n📈 Follow these creators for amazing content!\n#YouTube #TrendingCreators`;
     
-    return headerText + creatorEntries.join('\n\n') + footerText;
+    return this.enforceTweetLength(headerText + creatorEntries.join('\n') + footerText);
   }
 
   /**
@@ -184,7 +222,7 @@ export class TweetFormatter {
     // Add inspiring footer
     const footerText = `\n\n🚀 Keep growing, creators! Who will top tomorrow's list? 🤔\n#YouTubeGrowth #CreatorEconomy #ContentCreators`;
     
-    return headerText + creatorEntries.join('\n\n') + footerText;
+    return this.enforceTweetLength(headerText + creatorEntries.join('\n\n') + footerText);
   }
 
   /**
@@ -193,12 +231,12 @@ export class TweetFormatter {
    * @returns Formatted tweet text
    */
   static formatTrackingAnnouncementTweet(channelInfo: YoutubeChannel): string {
-    return `📡 NOW TRACKING: ${channelInfo.title}! 📡\n\n` +
-           `👥 ${this.formatNumber(channelInfo.statistics.subscriberCount)} subscribers\n` +
+    const tweet = `📡 NOW TRACKING: ${channelInfo.title}!\n` +
+           `👥 ${this.formatNumber(channelInfo.statistics.subscriberCount)} subs • ` +
            `👁️ ${this.formatNumber(channelInfo.statistics.viewCount)} views\n` +
-           `🎬 ${channelInfo.statistics.videoCount} videos\n\n` +
-           `We'll monitor growth and notify about significant changes! 📊\n\n` +
            `#YouTubeCreator #ContentCreation`;
+           
+    return this.enforceTweetLength(tweet);
   }
 
   /**
@@ -207,7 +245,12 @@ export class TweetFormatter {
    * @returns Formatted rank string
    */
   private static formatRank(rank: number): string {
-    const medals = ['🥇', '🥈', '🥉'];
-    return rank <= 3 ? `${medals[rank - 1]} #${rank}` : `#${rank}`;
+    // Use medals for top 3, star for others
+    if (rank <= 3) {
+      const medals = ['🥇', '🥈', '🥉'];
+      return `${medals[rank - 1]} #${rank}`;
+    } else {
+      return `⭐ #${rank}`; // Use star emoji for ranks 4 and beyond
+    }
   }
 } 

@@ -6,6 +6,7 @@ import * as storage from "../db/storage";
 
 import TwitterPlugin from "../../twitterPlugin/src/twitterPlugin";
 import { TweetFormatter } from "./tweetFormatter";
+import { AIResponseGenerator } from "./aiResponseGenerator";
 
 // Plugin state interface
 export interface PluginState {
@@ -31,7 +32,7 @@ class YoutubePlugin {
     private name: string;
     private description: string;
     private youtubeClient: youtubeClient;
-    private twitterPlugin?: TwitterPlugin;
+    public twitterPlugin?: TwitterPlugin;
     private scheduler: YoutubeScheduler;
     private state: PluginState;
     private onStateUpdate?: (state: PluginState) => void;
@@ -80,46 +81,159 @@ class YoutubePlugin {
     }
 
     // Method to post a tweet using the Twitter plugin
-    public async postTweet(content: string, reason: string): Promise<boolean> {
+    public async postTweet(tweet: string, reason: string): Promise<boolean> {
         if (!this.twitterPlugin) {
-            console.log("No Twitter plugin configured, skipping tweet:", content);
+            console.log("No Twitter plugin configured, skipping tweet:", tweet);
             return false;
         }
 
         try {
-            console.log(`Sending tweet: ${content.substring(0, 50)}... (${reason})`);
+            console.log(`Preparing to post tweet: ${tweet.substring(0, 50)}... (${reason})`);
             
-            // Get the tweet function from the Twitter plugin
-            const tweetFn = (this.twitterPlugin as any).postTweetFunction;
-            if (!tweetFn || !tweetFn.executable) {
+            // Get the postTweetFunction from the Twitter plugin
+            const postTweetFunction = this.twitterPlugin.postTweetFunction;
+            
+            if (!postTweetFunction || !postTweetFunction.executable) {
                 throw new Error("Twitter plugin does not have a valid post tweet function");
             }
             
-            // Execute the tweet function
-            const mockLogger = (msg: string) => console.log(`Posting tweet: ${msg}`);
-            const result = await tweetFn.executable({ 
-                tweet: content, 
+            // Log the Tweet content for debugging
+            console.log("Full tweet content:", tweet);
+            console.log("Using Twitter plugin to post tweet");
+            
+            // Execute the tweet function directly
+            const logger = (msg: string) => console.log(`Twitter posting: ${msg}`);
+            const result = await postTweetFunction.executable({ 
+                tweet: tweet, 
                 tweet_reasoning: reason 
-            }, mockLogger);
+            }, logger);
             
             // Update tweet count on success
             if (result && result.status === ExecutableGameFunctionStatus.Done) {
+                console.log("Tweet posted successfully!");
                 this.updateState({ totalTweets: (this.state.totalTweets || 0) + 1 });
                 return true;
             }
             
-            console.error("Failed to post tweet:", result?.message || "Unknown error");
+            console.error("Failed to post tweet:", result ? result.status : "Unknown error");
             return false;
-        } catch (error) {
-            console.error("Error posting tweet:", error);
+        } catch (error: any) {
+            console.error("Error posting tweet:", error.message || error);
             return false;
         }
+    }
+
+    // New method to engage with tweets about a creator
+    public async engageWithCreatorTweets(creatorName: string, channelId: string): Promise<void> {
+        if (!this.twitterPlugin) {
+            console.log("No Twitter plugin configured, skipping tweet engagement");
+            return;
+        }
+
+        try {
+            console.log(`Searching for tweets about ${creatorName}`);
+            
+            // Search for tweets about the creator
+            const searchResult = await this.twitterPlugin.searchTweetsFunction.executable(
+                { query: creatorName },
+                (msg: string) => console.log(`Searching tweets: ${msg}`)
+            );
+
+            if (searchResult && searchResult.status === ExecutableGameFunctionStatus.Done) {
+                // Extract only the JSON part from the feedback
+                // The feedback format is: "Tweets found:\n[...]"
+                let feedbackString = searchResult.feedback;
+                let jsonStartIndex = feedbackString.indexOf('[');
+                
+                if (jsonStartIndex === -1) {
+                    console.log("No valid JSON found in search result");
+                    return;
+                }
+                
+                // Extract only the JSON part
+                let jsonString = feedbackString.substring(jsonStartIndex);
+                const tweets = JSON.parse(jsonString);
+                
+                // Process each tweet
+                for (const tweet of tweets) {
+                    // Like the tweet
+                    await this.twitterPlugin.likeTweetFunction.executable(
+                        { tweet_id: tweet.tweetId },
+                        (msg: string) => console.log(`Liking tweet: ${msg}`)
+                    );
+
+                    // Reply with AI-generated content based on tweet context
+                    const channel = await storage.getChannel(channelId);
+                    if (channel) {
+                        // Generate an AI-powered response that considers the tweet content and sentiment
+                        const aiReply = AIResponseGenerator.generateReply(tweet.content, creatorName, channel.metrics);
+                        
+                        // Generate context-aware reasoning for this reply
+                        const replyReasoning = AIResponseGenerator.generateReplyReasoning(tweet.content, creatorName);
+                        
+                        console.log(`AI-generated reply: ${aiReply}`);
+                        console.log(`Reply reasoning: ${replyReasoning}`);
+                        
+                        await this.twitterPlugin.replyTweetFunction.executable(
+                            { 
+                                tweet_id: tweet.tweetId,
+                                reply: aiReply,
+                                reply_reasoning: replyReasoning
+                            },
+                            (msg: string) => console.log(`Replying to tweet: ${msg}`)
+                        );
+                        
+                        // For some tweets, also quote them with additional insights
+                        // Only quote tweets that have good engagement rates
+                        // Calculate engagement rate based on likes, retweets and impressions
+                        const impressions = tweet.impressions || (tweet.likes * 10 + tweet.retweets * 20); // Estimate impressions if not available
+                        const engagementRate = (tweet.likes + tweet.retweets) / impressions;
+                        
+                        if (engagementRate > 0.02) { // Quote tweets with >2% engagement rate
+                            const quoteContent = AIResponseGenerator.generateQuote(tweet.content, creatorName, channel.metrics);
+                            const quoteReasoning = AIResponseGenerator.generateQuoteReasoning(tweet.content, creatorName);
+                            
+                            await this.twitterPlugin.quoteTweetFunction.executable(
+                                {
+                                    tweet_id: tweet.tweetId,
+                                    quote: quoteContent
+                                },
+                                (msg: string) => console.log(`Quoting tweet: ${msg}`)
+                            );
+                            
+                            console.log(`Quote reasoning: ${quoteReasoning}`);
+                        }
+                    }
+                }
+            }
+        } catch (error: any) {
+            console.error("Error engaging with tweets:", error.message || error);
+        }
+    }
+
+    // Helper method to format numbers
+    private formatNumber(num: number): string {
+        if (num >= 1000000) {
+            return `${(num / 1000000).toFixed(1)}M`;
+        }
+        if (num >= 1000) {
+            return `${(num / 1000).toFixed(1)}K`;
+        }
+        return num.toString();
     }
 
     public getWorker(data?: {
         functions?: GameFunction<any>[];
         getEnvironment?: () => Promise<Record<string, any>>;
       }): GameWorker {
+        // Get Twitter functions if plugin is available
+        const twitterFunctions = this.twitterPlugin ? [
+          this.twitterPlugin.searchTweetsFunction,
+          this.twitterPlugin.replyTweetFunction,
+          this.twitterPlugin.likeTweetFunction,
+          this.twitterPlugin.quoteTweetFunction
+        ] : [];
+
         return new GameWorker({
           id: this.id,
           name: this.name,
@@ -131,7 +245,9 @@ class YoutubePlugin {
             this.getChannelMetricsFunction,
             this.getTrendingVideosFunction,
             this.startMonitoringFunction,
-            this.stopMonitoringFunction
+            this.stopMonitoringFunction,
+            this.tweetFunction,
+            ...twitterFunctions // Add Twitter functions
           ],
           getEnvironment: data?.getEnvironment || this.getMetrics.bind(this),
         });
@@ -611,6 +727,120 @@ class YoutubePlugin {
             console.error("Error tracking channel:", error);
             return {success: false, message: `Error tracking channel: ${error.message}`};
         }
+    }
+
+    // Direct tweet function
+    get tweetFunction() {
+      return new GameFunction({
+        name: "tweet",
+        description: "Post a tweet directly to Twitter",
+        args: [
+          { name: "message", description: "The content of the tweet" },
+          { name: "context", description: "Optional context about what this tweet refers to (e.g., channel name, event, etc.)" }
+        ] as const,
+        executable: async (args, logger) => {
+          try {
+            if (!args.message) {
+              return new ExecutableGameFunctionResponse(
+                ExecutableGameFunctionStatus.Failed,
+                "Tweet content is required"
+              );
+            }
+
+            logger(`Attempting to post tweet directly: ${args.message.substring(0, 50)}...`);
+            
+            if (!this.twitterPlugin) {
+              logger("No Twitter plugin available, cannot post tweet");
+              return new ExecutableGameFunctionResponse(
+                ExecutableGameFunctionStatus.Failed,
+                "Twitter integration not available"
+              );
+            }
+            
+            // Generate AI reasoning for this tweet
+            let tweetReasoning = "Direct tweet request";
+            if (args.context) {
+              const topics = AIResponseGenerator.extractTopics(args.message);
+              tweetReasoning = `Tweeting about ${args.context} - ${topics.length > 0 ? 
+                'focusing on ' + topics.join(', ') : 
+                'providing general updates'}`;
+            }
+            
+            logger(`Tweet reasoning: ${tweetReasoning}`);
+            
+            try {
+              // Direct access to client for more reliable posting
+              const twitterClient = (this.twitterPlugin as any).twitterClient;
+              
+              if (!twitterClient || typeof twitterClient.post !== 'function') {
+                logger("Twitter client not properly configured");
+                throw new Error("Twitter client not properly configured");
+              }
+              
+              // Post directly using the client
+              logger("Posting directly via Twitter client");
+              await twitterClient.post(args.message);
+              logger("Tweet posted successfully via direct client access!");
+              
+              // Update tweet count in state
+              this.updateState({ 
+                totalTweets: (this.state.totalTweets || 0) + 1 
+              });
+              
+              return new ExecutableGameFunctionResponse(
+                ExecutableGameFunctionStatus.Done,
+                "Tweet posted successfully via direct access"
+              );
+            } catch (directError: any) {
+              logger(`Direct posting failed: ${directError.message}`);
+              
+              // Fall back to GameFunction method
+              logger("Falling back to standard Twitter function");
+              
+              // Get the post tweet function
+              const postTweetFunction = this.twitterPlugin.postTweetFunction;
+              
+              if (!postTweetFunction) {
+                throw new Error("Twitter plugin does not have a postTweetFunction");
+              }
+              
+              // Execute the tweet function
+              const result = await postTweetFunction.executable({ 
+                tweet: args.message, 
+                tweet_reasoning: tweetReasoning
+              }, logger);
+              
+              if (result.status === ExecutableGameFunctionStatus.Done) {
+                logger("Tweet posted successfully via function!");
+                
+                // Update tweet count in state
+                this.updateState({ 
+                  totalTweets: (this.state.totalTweets || 0) + 1 
+                });
+                
+                return new ExecutableGameFunctionResponse(
+                  ExecutableGameFunctionStatus.Done,
+                  "Tweet posted successfully via function"
+                );
+              } else {
+                throw new Error(`Twitter function failed: ${result.status}`);
+              }
+            }
+          } catch (error: any) {
+            logger(`Failed to post tweet: ${error.message}`);
+            return new ExecutableGameFunctionResponse(
+              ExecutableGameFunctionStatus.Failed,
+              `Failed to post tweet: ${error.message}`
+            );
+          }
+        }
+      });
+    }
+
+    // Add getter for monitoring status
+    public get isMonitoring(): boolean {
+        // Use type assertion to safely access the property
+        return (this.scheduler as any).isRunning;
     }
 }
 

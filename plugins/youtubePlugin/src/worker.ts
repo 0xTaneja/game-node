@@ -7,6 +7,24 @@ export const youtubeMonitorWorker = new GameWorker({
     id: "youtube_monitor",
     name: "YouTube Monitor Worker",
     description: "A worker that monitors YouTube channels, identifies trends, and tracks creator metrics",
+    getEnvironment: async () => {
+        try {
+            // Get minimal stats to reduce payload size
+            const channelCount = await storage.getChannelCount();
+            const isDryRun = process.env.TWITTER_DRY_RUN === 'true';
+            
+            // Return minimal data to avoid large payloads
+            return {
+                CHANNELS: channelCount.toString(),
+                MONITORING: youtubePlugin ? "ON" : "OFF",
+                MODE: isDryRun ? "DRY" : "LIVE",
+                UPDATED: new Date().toISOString().split('T')[0]
+            };
+        } catch (error) {
+            console.error("Error getting environment:", error);
+            return { ERROR: "Failed to get data" };
+        }
+    },
     functions: [
         // Track YouTube channel
         new GameFunction({
@@ -197,32 +215,23 @@ export const youtubeMonitorWorker = new GameWorker({
                         );
                     }
                     
-                    // Since we don't have a direct postUpdateFunction in youtubePlugin,
-                    // we need to check if the plugin has a twitterPlugin available and use it directly
-                    try {
-                        // Post directly to Twitter using console.log to track the process
-                        logger(`Posting tweet: ${args.message}`);
-                        
-                        // This is a workaround since we don't have direct access to the Twitter plugin
-                        // In a real implementation, this would need a proper method in youtubePlugin
-                        await youtubePlugin.trackChannelFunction.executable({
-                            channel_id: args.channelId
-                        }, (msg: string) => {
-                            logger(`Twitter post process: ${msg}`);
-                        });
-                        
-                        logger(`Tweet about ${channel.name} has been queued`);
-                        
+                    // Use the youtubePlugin's postTweet method directly
+                    const success = await youtubePlugin.postTweet(
+                        args.message,
+                        `Update about YouTube channel: ${channel.name}`
+                    );
+                    
+                    if (success) {
+                        logger(`Tweet about ${channel.name} has been posted successfully`);
                         return new ExecutableGameFunctionResponse(
                             ExecutableGameFunctionStatus.Done,
                             `Posted update about ${channel.name} to Twitter`
                         );
-                    } catch (twitterError) {
-                        const errorMsg = twitterError instanceof Error ? twitterError.message : String(twitterError);
-                        logger(`Error posting to Twitter: ${errorMsg}`);
+                    } else {
+                        logger(`Failed to post tweet about ${channel.name}`);
                         return new ExecutableGameFunctionResponse(
                             ExecutableGameFunctionStatus.Failed,
-                            `Failed to post to Twitter: ${errorMsg}`
+                            `Failed to post update about ${channel.name} to Twitter`
                         );
                     }
                 } catch (e) {
@@ -236,3 +245,56 @@ export const youtubeMonitorWorker = new GameWorker({
         })
     ]
 });
+
+// Add direct tweet function for maximum compatibility
+youtubeMonitorWorker.functions.push(
+    new GameFunction({
+        name: "tweet",
+        description: "Post a tweet directly to Twitter",
+        args: [
+            { name: "message", description: "The content of the tweet" }
+        ] as const,
+        executable: async (args, logger) => {
+            try {
+                if (!args.message) {
+                    return new ExecutableGameFunctionResponse(
+                        ExecutableGameFunctionStatus.Failed,
+                        "Tweet content is required"
+                    );
+                }
+
+                logger(`Posting tweet: ${args.message.substring(0, 50)}...`);
+                
+                try {
+                    // Use youtubePlugin's postTweet method which is safer
+                    const success = await youtubePlugin.postTweet(
+                        args.message,
+                        "Direct tweet request"
+                    );
+                    
+                    if (success) {
+                        logger("Tweet posted successfully!");
+                        return new ExecutableGameFunctionResponse(
+                            ExecutableGameFunctionStatus.Done,
+                            "Tweet posted successfully"
+                        );
+                    } else {
+                        throw new Error("Failed to post tweet using plugin method");
+                    }
+                } catch (error) {
+                    const errorMessage = error instanceof Error ? error.message : String(error);
+                    return new ExecutableGameFunctionResponse(
+                        ExecutableGameFunctionStatus.Failed,
+                        `Failed to post tweet: ${errorMessage}`
+                    );
+                }
+            } catch (e) {
+                const errorMessage = e instanceof Error ? e.message : String(e);
+                return new ExecutableGameFunctionResponse(
+                    ExecutableGameFunctionStatus.Failed,
+                    `Failed to post tweet: ${errorMessage}`
+                );
+            }
+        }
+    })
+);

@@ -1,4 +1,4 @@
-import { YoutubeChannel } from './youtubeClient';
+import { YoutubeChannel, youtubeClient } from './youtubeClient';
 import { ChannelMetrics, IChannel, getAdaptiveThreshold } from '../db/storage';
 
 /**
@@ -102,11 +102,68 @@ export class AnalyticService {
     
     /**
      * Get trending creators based on engagement scores
-     * @param channels List of YouTube channels
+     * @param client YouTube API client or array of channels
      * @param limit Maximum number of creators to return
      * @returns Array of top trending creators
      */
-    public static getTrendingCreators(channels: YoutubeChannel[], limit: number = 5): YoutubeChannel[] {
+    public static async getTrendingCreators(
+        client: youtubeClient | YoutubeChannel[], 
+        limit: number = 5
+    ): Promise<YoutubeChannel[]> {
+        // If client is a youtubeClient, fetch trending videos and channels
+        if (typeof (client as youtubeClient).searchChannels === 'function') {
+            const youtubeApi = client as youtubeClient;
+            
+            try {
+                console.log("Fetching trending videos to find trending creators...");
+                
+                // Get trending videos
+                const trendingVideos = await youtubeApi.getTrendingVideos("US", 50);
+                
+                if (!trendingVideos || trendingVideos.length === 0) {
+                    console.log("No trending videos found");
+                    return [];
+                }
+                
+                console.log(`Found ${trendingVideos.length} trending videos`);
+                
+                // Extract unique channel IDs from trending videos
+                const channelIds = [...new Set(trendingVideos.map(video => video.channelId))];
+                console.log(`Extracted ${channelIds.length} unique channels from trending videos`);
+                
+                // Fetch details for each channel
+                const channelPromises = channelIds.map(id => youtubeApi.getChannel(id));
+                const channelsResult = await Promise.allSettled(channelPromises);
+                
+                // Filter out channels that were successfully retrieved
+                const channels = channelsResult
+                    .filter((result): result is PromiseFulfilledResult<YoutubeChannel> => 
+                        result.status === 'fulfilled' && result.value !== null
+                    )
+                    .map(result => result.value);
+                
+                console.log(`Successfully retrieved ${channels.length} channels`);
+                
+                // Calculate engagement scores and sort
+                return this.rankChannelsByEngagement(channels, limit);
+            } catch (error) {
+                console.error("Error fetching trending creators:", error);
+                return [];
+            }
+        } else {
+            // If an array of channels was provided, just rank them
+            const channels = client as YoutubeChannel[];
+            return this.rankChannelsByEngagement(channels, limit);
+        }
+    }
+    
+    /**
+     * Rank channels by engagement score
+     * @param channels Array of YouTube channels
+     * @param limit Maximum number to return
+     * @returns Top channels by engagement score
+     */
+    private static rankChannelsByEngagement(channels: YoutubeChannel[], limit: number): YoutubeChannel[] {
         if (!channels || channels.length === 0) return [];
         
         // Calculate engagement scores for all channels

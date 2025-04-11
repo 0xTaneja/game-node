@@ -62,17 +62,52 @@ export async function connectDB(){
     const MONGODB_DB_NAME = process.env.MONGODB_DB_NAME || 'youtube_monitor';
 
     try{
-      // Connect to the main URI but ensure we're using the youtube_monitor database
-      await connect(MONGODB_URI);
+      // Force disconnection if there was a previous connection with wrong database
+      if (mongoose.connection.readyState !== 0) {
+        console.log("Disconnecting from previous MongoDB connection");
+        await mongoose.disconnect();
+      }
       
-      // Explicitly set the database to use
-      mongoose.connection.useDb(MONGODB_DB_NAME, { useCache: true });
+      // Ensure the URI includes the correct database name
+      let uri = MONGODB_URI;
+      if (!uri.endsWith(MONGODB_DB_NAME)) {
+        // If URI doesn't end with the database name, append it
+        if (uri.includes('?')) {
+          // URI has parameters
+          const uriParts = uri.split('?');
+          uri = `${uriParts[0].replace(/\/[^/]*$/, '')}/${MONGODB_DB_NAME}?${uriParts[1]}`;
+        } else {
+          // URI has no parameters
+          uri = `${uri.replace(/\/[^/]*$/, '')}/${MONGODB_DB_NAME}`;
+        }
+      }
+      
+      console.log(`Connecting to MongoDB with database: ${MONGODB_DB_NAME}`);
+      console.log(`Connection URI: ${uri.replace(/\/\/[^:]+:[^@]+@/, '//***:***@')}`); // Log URI with credentials masked
+      
+      // Connect with the updated URI
+      await connect(uri);
       
       isConnected = true;
       console.log(`MongoDB connected successfully to database: ${MONGODB_DB_NAME}`);
+      
+      // Verify the database being used
+      if (mongoose.connection.readyState === 1) {
+        try {
+          const dbName = mongoose.connection.db?.databaseName;
+          console.log(`Active database: ${dbName}`);
+          if (dbName !== MONGODB_DB_NAME) {
+            console.warn(`WARNING: Connected to ${dbName} instead of ${MONGODB_DB_NAME}!`);
+          }
+        } catch (error) {
+          console.warn("Unable to get database name:", error);
+        }
+      } else {
+        console.warn("Connection not ready, can't verify database name");
+      }
     }
     catch(error){
-     console.error('MongoDB Connection Error :',error);
+     console.error('MongoDB Connection Error:', error);
      throw error;
     }
 }
@@ -96,29 +131,107 @@ export async function getChannel(channelId:string):Promise<IChannel | null>{
     return Channel.findOne({channelId}).exec();
 }
 
-export async function updateChannelMetrics(channelId:string,metrics:ChannelMetrics) : Promise<IChannel | null> {
+export async function updateChannelMetrics(channelId:string, metrics:ChannelMetrics): Promise<IChannel | null> {
     await connectDB();
 
     const channel = await Channel.findOne({channelId});
 
-    if(!channel)
+    if(!channel) {
+        console.error(`Cannot update metrics: Channel with ID ${channelId} not found`);
         return null;
+    }
 
-    if(!channel.metricsHistory){
+    // Log previous metrics
+    console.log(`Updating metrics for channel: ${channel.name} (${channelId})`);
+    console.log('Previous metrics:', {
+        subscribers: channel.metrics.subscribers,
+        views: channel.metrics.views,
+        likes: channel.metrics.likes,
+        lastChecked: new Date(channel.metrics.lastChecked).toISOString()
+    });
+    
+    // Log new metrics and calculate changes
+    console.log('New metrics:', {
+        subscribers: metrics.subscribers,
+        views: metrics.views,
+        likes: metrics.likes,
+        lastChecked: new Date(metrics.lastChecked).toISOString()
+    });
+    
+    // Calculate and log percentage changes
+    const subscriberChange = calculatePercentageChange(channel.metrics.subscribers, metrics.subscribers);
+    const viewsChange = calculatePercentageChange(channel.metrics.views, metrics.views);
+    const likesChange = calculatePercentageChange(channel.metrics.likes, metrics.likes);
+    
+    console.log('Metrics changes:', {
+        subscribers: `${subscriberChange > 0 ? '+' : ''}${subscriberChange.toFixed(2)}%`,
+        views: `${viewsChange > 0 ? '+' : ''}${viewsChange.toFixed(2)}%`,
+        likes: `${likesChange > 0 ? '+' : ''}${likesChange.toFixed(2)}%`
+    });
+    
+    // Determine if changes are significant based on adaptive thresholds
+    const subsThreshold = getAdaptiveThreshold('SUBS_CHANGE', metrics.subscribers);
+    const viewsThreshold = getAdaptiveThreshold('VIEWS_CHANGE', metrics.views);
+    const likesThreshold = getAdaptiveThreshold('LIKES_CHANGE', metrics.likes);
+    
+    console.log('Adaptive thresholds:', {
+        subscribers: `${(subsThreshold * 100).toFixed(3)}%`,
+        views: `${(viewsThreshold * 100).toFixed(3)}%`,
+        likes: `${(likesThreshold * 100).toFixed(3)}%`
+    });
+    
+    const isSignificantSubs = Math.abs(subscriberChange / 100) > subsThreshold;
+    const isSignificantViews = Math.abs(viewsChange / 100) > viewsThreshold;
+    const isSignificantLikes = Math.abs(likesChange / 100) > likesThreshold;
+    
+    console.log('Significant changes detected:', {
+        subscribers: isSignificantSubs,
+        views: isSignificantViews,
+        likes: isSignificantLikes,
+        any: isSignificantSubs || isSignificantViews || isSignificantLikes
+    });
+
+    // Initialize metrics history array if it doesn't exist
+    if(!channel.metricsHistory) {
         channel.metricsHistory = [];
     }
 
-    if(channel.metricsHistory.length >= 30)
-    {
+    // Store current metrics in history with timestamp
+    const metricsCopy = {
+        subscribers: channel.metrics.subscribers,
+        views: channel.metrics.views,
+        likes: channel.metrics.likes,
+        lastVideoId: channel.metrics.lastVideoId,
+        lastVideoTimestamp: channel.metrics.lastVideoTimestamp,
+        lastChecked: channel.metrics.lastChecked
+    };
+    
+    // Limit history to 30 data points
+    if(channel.metricsHistory.length >= 30) {
         channel.metricsHistory.shift();
+        console.log('Metrics history at capacity, removing oldest entry');
     }
 
-    channel.metricsHistory.push(channel.metrics);
+    channel.metricsHistory.push(metricsCopy);
+    console.log(`Added metrics to history (${channel.metricsHistory.length} entries)`);
 
+    // Update current metrics
     channel.metrics = metrics;
 
-    await channel.save();
-    return channel;
+    try {
+        await channel.save();
+        console.log(`Successfully updated metrics for ${channel.name}`);
+        return channel;
+    } catch (error) {
+        console.error(`Error saving updated metrics for ${channel.name}:`, error);
+        throw error;
+    }
+}
+
+// Helper function to calculate percentage change
+function calculatePercentageChange(oldValue: number, newValue: number): number {
+    if (oldValue === 0) return newValue > 0 ? 100 : 0;
+    return ((newValue - oldValue) / oldValue) * 100;
 }
 
 export async function createChannel(channelId:string,name:string,metrics:ChannelMetrics):Promise<IChannel>{
@@ -189,4 +302,69 @@ export function getAdaptiveThreshold(metricType: string, count: number): number 
   
   // Default fallback
   return baseThreshold;
+}
+
+/**
+ * Get the count of all tracked channels
+ * @returns number of tracked channels
+ */
+export async function getChannelCount(): Promise<number> {
+    await connectDB();
+    return Channel.countDocuments({ isTracking: true }).exec();
+}
+
+/**
+ * Check if a channel is already being tracked
+ * @param channelId The YouTube channel ID to check
+ * @returns True if channel is already being tracked
+ */
+export async function isChannelTracked(channelId: string): Promise<boolean> {
+    await connectDB();
+    const channel = await Channel.findOne({ channelId }).exec();
+    return channel !== null;
+}
+
+/**
+ * Track a new YouTube channel
+ * @param channelData The channel data including ID, name, and metrics
+ * @returns The newly created channel document
+ */
+export async function trackChannel(channelData: {
+    channelId: string;
+    name: string;
+    monitoringTier?: number;
+    metrics: ChannelMetrics;
+}): Promise<IChannel> {
+    await connectDB();
+    
+    // Check if channel already exists
+    const existingChannel = await Channel.findOne({ channelId: channelData.channelId }).exec();
+    if (existingChannel) {
+        console.log(`Channel ${channelData.name} is already being tracked, updating instead`);
+        
+        // Update existing channel
+        existingChannel.name = channelData.name;
+        existingChannel.isTracking = true;
+        existingChannel.lastTrendingDate = new Date();
+        existingChannel.monitoringTier = channelData.monitoringTier || 1;
+        existingChannel.metrics = channelData.metrics;
+        
+        await existingChannel.save();
+        return existingChannel;
+    }
+    
+    // Create new channel
+    const newChannel = new Channel({
+        channelId: channelData.channelId,
+        name: channelData.name,
+        isTracking: true,
+        lastTrendingDate: new Date(),
+        monitoringTier: channelData.monitoringTier || 1,
+        metrics: channelData.metrics,
+        metricsHistory: []
+    });
+    
+    await newChannel.save();
+    console.log(`Started tracking new channel: ${channelData.name}`);
+    return newChannel;
 }

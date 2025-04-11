@@ -1,0 +1,15 @@
+{
+  "network": "base-sepolia",
+  "creatorToken": {
+    "proxy": "0xE71fFde7Bd8BD006AeE069FF06DD7621Ce2A4544",
+    "implementation": "0xE78abd28Ba30Bb694540f8727AB4B7C92d01F56d"
+  },
+  "yuna": {
+    "liquidityManager": "0x202b471176F1bE0CDe16928390B9FF16306356DC",
+    "yunaDex": "0xABBCf79CA574B2c9A17387BDD4CA1e87e16ccA6E",
+    "yunaRouter": "0xc6F4E334BcFaeAcac672bb986A4575bD7C6254d7"
+  },
+  "deployer": "0x045c5A451C51c5cd3D5aD81F2eBe6848F8c87FFB",
+  "timestamp": "2025-04-11T16:16:53.041Z",
+  "gasCost": "0.309202661080917048"
+}
